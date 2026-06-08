@@ -27,6 +27,7 @@ import type {
 } from "./types";
 import { DEFAULT_MATERIAL } from "./materials";
 import { HBEAM_CATALOG } from "./catalog";
+import { getSupplierInfo, totalCost } from "./suppliers";
 
 export const LOAD_CASE_LABELS: Record<LoadCaseId, string> = {
   "point-near": "Point load near support",
@@ -55,6 +56,8 @@ function resolve(s: Scenario): Required<Scenario> {
     deflectionLimit: s.deflectionLimit ?? 360,
     bucklingK: s.bucklingK ?? 1.0,
     pointNearAMm: s.pointNearAMm ?? 1000,
+    objective: s.objective ?? "weight",
+    requireInStock: s.requireInStock ?? false,
   };
 }
 
@@ -146,6 +149,9 @@ export function evaluateBeam(
     1 / worstDeflection.deflectionRatio,
   );
 
+  const supplier = getSupplierInfo(profile.name, profile.weight);
+  const totalCostIdr = totalCost(supplier, L);
+
   return {
     profile,
     cases,
@@ -160,6 +166,8 @@ export function evaluateBeam(
     deflectionOk,
     passes,
     minSafetyFactor,
+    supplier,
+    totalCostIdr,
   };
 }
 
@@ -175,13 +183,22 @@ export function selectBeam(
   const reports = catalog.map((p) => evaluateBeam(p, scenario));
   reports.sort((a, b) => {
     if (a.passes !== b.passes) return a.passes ? -1 : 1;
-    if (a.passes) return a.profile.weight - b.profile.weight;
+    if (a.passes) {
+      if (s.requireInStock && a.supplier.inStock !== b.supplier.inStock)
+        return a.supplier.inStock ? -1 : 1;
+      return s.objective === "cost"
+        ? a.totalCostIdr - b.totalCostIdr
+        : a.profile.weight - b.profile.weight;
+    }
     return (
       Math.max(a.worstStress.stressRatio, a.worstDeflection.deflectionRatio) -
       Math.max(b.worstStress.stressRatio, b.worstDeflection.deflectionRatio)
     );
   });
-  return { scenario: s, reports, recommended: reports.find((r) => r.passes) ?? null };
+  const recommended =
+    reports.find((r) => r.passes && (!s.requireInStock || r.supplier.inStock)) ??
+    null;
+  return { scenario: s, reports, recommended };
 }
 
 /** Build a scenario from a mass + multiplier instead of a raw force. */

@@ -23,6 +23,9 @@ export interface HBeamProfile {
   Sy: number; // cm^3
 }
 
+import type { SupplierInfo } from "./suppliers";
+export type { SupplierInfo };
+
 export interface Material {
   name: string;
   /** Yield strength fy (MPa). */
@@ -54,6 +57,10 @@ export interface Scenario {
   bucklingK: number;
   /** Position a of the "near support" point load (mm). Default 1000. */
   pointNearAMm: number;
+  /** Optimisation objective: lightest weight or lowest material cost. */
+  objective: "weight" | "cost";
+  /** Only recommend sections a supplier has in stock. */
+  requireInStock: boolean;
 }
 
 export interface LoadCaseResult {
@@ -83,6 +90,9 @@ export interface BeamReport {
   passes: boolean;
   /** min(allowable/worst) across stress and deflection; >=1 is safe. */
   minSafetyFactor: number;
+  supplier: SupplierInfo;
+  /** Total material cost over the span (IDR). */
+  totalCostIdr: number;
 }
 
 export interface SelectionReport {
