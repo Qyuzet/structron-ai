@@ -12,6 +12,11 @@ the SCIE6063001 Computational Physics submission. Shares the same JIS catalog
 - `surrogate.py` — **ML surrogate**: builds a dataset by running the FE solver
   over thousands of designs, trains an MLP to predict deflection/stress
   (held-out R2 ~0.99). `python surrogate.py` prints the metrics.
+- `pinn.py` — **Physics-Informed Neural Network**: solves the beam ODE
+  EI w'''' = q from the equation alone (no data), matching the closed form to
+  ~0.01%. `python pinn.py`.
+- `report.py` — generates a multi-page `Structron_Report.pdf` (benchmark, FE
+  validation, ML parity, PINN, conclusion). `python report.py`.
 - `structron.py` — closed-form engine: six load cases, FoS allowable, Euler
   buckling, catalog ranking (used as the analytical baseline).
 - `catalog.json` — 89 JIS / European H-sections (exported from the shared TS
@@ -23,6 +28,10 @@ the SCIE6063001 Computational Physics submission. Shares the same JIS catalog
   nbconvert.
 
 ## Run
+
+> On Windows, torch + numpy can clash on the OpenMP runtime
+> (`OMP: Error #15`). If you hit it, set `KMP_DUPLICATE_LIB_OK=TRUE` before
+> running, or install the CPU-only torch wheel.
 
 ```bash
 pip install -r requirements.txt
