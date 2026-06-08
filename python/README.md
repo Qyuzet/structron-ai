@@ -6,13 +6,21 @@ the SCIE6063001 Computational Physics submission. Shares the same JIS catalog
 
 ## Contents
 
-- `structron.py` — the engine: six load cases, FoS-based allowable stress,
-  Euler buckling, catalog ranking. Pure standard library.
+- `fea.py` — **2D plane-frame finite element solver** (direct stiffness method,
+  beam-column elements, 3 DOF/node). Handles multi-span beams and portal frames.
+  Validated to the analytical benchmark.
+- `surrogate.py` — **ML surrogate**: builds a dataset by running the FE solver
+  over thousands of designs, trains an MLP to predict deflection/stress
+  (held-out R2 ~0.99). `python surrogate.py` prints the metrics.
+- `structron.py` — closed-form engine: six load cases, FoS allowable, Euler
+  buckling, catalog ranking (used as the analytical baseline).
 - `catalog.json` — 89 JIS / European H-sections (exported from the shared TS
   catalog).
-- `Structron.ipynb` — the analysis notebook: benchmark validation against the
-  manual report, error analysis, visualizations, and agentic selection.
-- `requirements.txt` — pandas, matplotlib, numpy, jupyter, nbconvert.
+- `Structron.ipynb` — the analysis notebook: closed-form benchmark + error
+  analysis, FE validation + portal frame, ML surrogate + parity plots, and
+  agentic selection.
+- `requirements.txt` — numpy, pandas, matplotlib, scikit-learn, jupyter,
+  nbconvert.
 
 ## Run
 
