@@ -3,5 +3,6 @@ pandas
 matplotlib
 scikit-learn
 torch
+anastruct
 jupyter
 nbconvert

@@ -17,6 +17,11 @@ the SCIE6063001 Computational Physics submission. Shares the same JIS catalog
   ~0.01%. `python pinn.py`.
 - `report.py` — generates a multi-page `Structron_Report.pdf` (benchmark, FE
   validation, ML parity, PINN, conclusion). `python report.py`.
+- `verify_external.py` — independent cross-check against **anastruct** (an
+  open-source 2D structural FE library), alongside the analytical solution.
+  Commercial packages (ANSYS/SAP2000) have no public API to call, so an
+  established open-source FE library is used as the third independent method.
+  `python verify_external.py`.
 - `structron.py` — closed-form engine: six load cases, FoS allowable, Euler
   buckling, catalog ranking (used as the analytical baseline).
 - `catalog.json` — 89 JIS / European H-sections (exported from the shared TS
