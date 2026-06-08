@@ -175,12 +175,55 @@ export function evaluateBeam(
  * Evaluate and rank the catalog. Passing profiles first (lightest weight =
  * most economical), then failing profiles by lowest worst-case utilisation.
  */
+/** A price/stock override row extracted from a supplier quotation. */
+export interface QuoteOverride {
+  section: string;
+  pricePerKg?: number;
+  pricePerM?: number;
+  stockM?: number;
+  supplier?: string;
+  leadDays?: number;
+}
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Apply quoted prices/stock onto matching reports and recompute cost. */
+function applyOverrides(
+  reports: BeamReport[],
+  overrides: QuoteOverride[],
+  spanMm: number,
+) {
+  for (const r of reports) {
+    const pn = norm(r.profile.name);
+    const ov = overrides.find((o) => {
+      const on = norm(o.section);
+      return on.length >= 4 && (pn.includes(on) || on.includes(pn));
+    });
+    if (!ov) continue;
+    const sup = r.supplier;
+    if (ov.pricePerKg != null) {
+      sup.pricePerKg = ov.pricePerKg;
+      sup.pricePerM = Math.round(ov.pricePerKg * r.profile.weight);
+    }
+    if (ov.pricePerM != null) sup.pricePerM = ov.pricePerM;
+    if (ov.stockM != null) {
+      sup.stockM = ov.stockM;
+      sup.inStock = ov.stockM > 0;
+    }
+    if (ov.supplier) sup.supplier = ov.supplier;
+    if (ov.leadDays != null) sup.leadDays = ov.leadDays;
+    r.totalCostIdr = Math.round(sup.pricePerM * (spanMm / 1000));
+  }
+}
+
 export function selectBeam(
   scenario: Scenario,
   catalog: HBeamProfile[] = HBEAM_CATALOG,
+  overrides?: QuoteOverride[],
 ): SelectionReport {
   const s = resolve(scenario);
   const reports = catalog.map((p) => evaluateBeam(p, scenario));
+  if (overrides?.length) applyOverrides(reports, overrides, s.spanMm);
   reports.sort((a, b) => {
     if (a.passes !== b.passes) return a.passes ? -1 : 1;
     if (a.passes) {
