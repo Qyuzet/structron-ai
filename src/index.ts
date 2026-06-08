@@ -4,3 +4,4 @@ export * from "./suppliers";
 export * from "./catalog";
 export * from "./engine";
 export * from "./fea";
+export * from "./surrogate";

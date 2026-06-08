@@ -244,6 +244,39 @@ export function analyzeFrame(model: FrameModel): FrameResult {
 
 type Sec = { E: number; A: number; I: number; Sx: number };
 
+/** Simply supported beam at a chosen mesh density (for convergence + ML data). */
+export function simpleBeamFE(
+  spanMm: number,
+  totalForceN: number,
+  sec: Sec,
+  nElems = 12,
+  load: "udl" | "point-mid" = "udl",
+): FrameResult {
+  const nodes = Array.from({ length: nElems + 1 }, (_, i) => ({
+    x: (spanMm * i) / nElems,
+    y: 0,
+  }));
+  const w = load === "udl" ? totalForceN / spanMm : 0;
+  const elements = Array.from({ length: nElems }, (_, i) => ({
+    n1: i,
+    n2: i + 1,
+    E: sec.E,
+    A: sec.A,
+    I: sec.I,
+    Sx: sec.Sx,
+    w,
+  }));
+  const supports: Record<number, [boolean, boolean, boolean]> = {
+    0: [true, true, false],
+    [nElems]: [false, true, false],
+  };
+  const loads: Record<number, [number, number, number]> =
+    load === "point-mid"
+      ? { [Math.floor(nElems / 2)]: [0, totalForceN, 0] }
+      : {};
+  return analyzeFrame({ nodes, elements, supports, loads });
+}
+
 export function presetModel(
   kind: "simple" | "cantilever" | "two-span" | "portal",
   spanMm: number,
