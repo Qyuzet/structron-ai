@@ -1,145 +1,202 @@
 /**
- * Beam-theory engine for selecting an H-section.
+ * Structron beam-theory engine.
  *
- * Model: simply supported beam, strong-axis bending. Two load cases are
- * supported and may be combined with the beam self-weight:
- *   - uniformly distributed load (UDL):  Mmax = wL^2/8,  delta = 5wL^4/384EI
- *   - central point load:                Mmax = PL/4,    delta = PL^3/48EI
+ * Evaluates an H-section against the six Structron loading scenarios on a
+ * simply supported span, plus an Euler buckling stability check, and ranks
+ * the catalog to find the lightest section that passes every case.
  *
- * Checks (Allowable Stress Design):
- *   - bending:    sigma = M / Sx  <=  sigma_allow = factor * fy
- *   - deflection: delta            <=  L / limit   (e.g. L/360)
+ * Conventions: total design force F (N) is applied to the span. Point cases
+ * place F at a position; UDL cases spread it as w = F/L. Allowable stress is
+ * fy / FoS (Structron ASD); allowable deflection is L / limit (e.g. L/360).
  *
- * The "best" section is the lightest profile that passes both checks.
+ * Load-case formulas (simply supported, strong-axis bending):
+ *   point at a (b=L-a):  M = F a b / L,        delta = F a^2 b^2 / (3 E I L)
+ *   point at midspan:    M = F L / 4,          delta = F L^3 / (48 E I)
+ *   full UDL (w=F/L):    M = w L^2 / 8,         delta = 5 w L^4 / (384 E I)
+ *   half UDL (w=F/L):    M = 9 w L^2 / 128,     delta = 5 F L^3 / (768 E I)
+ *   Euler buckling:      Pcr = pi^2 E I / (K L)^2
  */
 
 import type {
   HBeamProfile,
-  SelectionCriteria,
-  BeamEvaluation,
-  SelectionResult,
+  Scenario,
+  LoadCaseId,
+  LoadCaseResult,
+  BeamReport,
+  SelectionReport,
 } from "./types";
+import { DEFAULT_MATERIAL } from "./materials";
 import { HBEAM_CATALOG } from "./catalog";
 
-const G = 9.81; // gravitational acceleration (m/s^2)
-
-const DEFAULTS = {
-  fyMpa: 240,
-  allowableStressFactor: 0.66,
-  deflectionLimit: 360,
-  eGpa: 200,
-  includeSelfWeight: true,
+export const LOAD_CASE_LABELS: Record<LoadCaseId, string> = {
+  "point-near": "Point load near support",
+  "point-quarter": "Point load at 25% span",
+  "point-mid": "Point load at midspan",
+  "udl-full": "Full uniformly distributed load",
+  "udl-half-left": "UDL over left half",
+  "udl-half-right": "UDL over right half",
 };
 
-function resolve(c: SelectionCriteria): Required<SelectionCriteria> {
+export const LOAD_CASE_ORDER: LoadCaseId[] = [
+  "point-near",
+  "point-quarter",
+  "point-mid",
+  "udl-full",
+  "udl-half-left",
+  "udl-half-right",
+];
+
+function resolve(s: Scenario): Required<Scenario> {
   return {
-    spanM: c.spanM,
-    loadType: c.loadType,
-    udlKnPerM: c.udlKnPerM ?? 0,
-    pointKn: c.pointKn ?? 0,
-    fyMpa: c.fyMpa ?? DEFAULTS.fyMpa,
-    allowableStressFactor:
-      c.allowableStressFactor ?? DEFAULTS.allowableStressFactor,
-    deflectionLimit: c.deflectionLimit ?? DEFAULTS.deflectionLimit,
-    eGpa: c.eGpa ?? DEFAULTS.eGpa,
-    includeSelfWeight: c.includeSelfWeight ?? DEFAULTS.includeSelfWeight,
+    spanMm: s.spanMm,
+    totalForceN: s.totalForceN,
+    material: s.material ?? DEFAULT_MATERIAL,
+    fos: s.fos ?? 3.0,
+    deflectionLimit: s.deflectionLimit ?? 360,
+    bucklingK: s.bucklingK ?? 1.0,
+    pointNearAMm: s.pointNearAMm ?? 1000,
   };
 }
 
-/** Evaluate a single profile against the criteria. */
+/** Moment (N*mm) and deflection (mm) for a load case. */
+function caseMD(
+  id: LoadCaseId,
+  F: number,
+  L: number,
+  E: number,
+  I: number,
+  aNear: number,
+): { M: number; delta: number } {
+  switch (id) {
+    case "point-near": {
+      const a = aNear;
+      const b = L - a;
+      return { M: (F * a * b) / L, delta: (F * a * a * b * b) / (3 * E * I * L) };
+    }
+    case "point-quarter": {
+      const a = 0.25 * L;
+      const b = L - a;
+      return { M: (F * a * b) / L, delta: (F * a * a * b * b) / (3 * E * I * L) };
+    }
+    case "point-mid":
+      return { M: (F * L) / 4, delta: (F * L * L * L) / (48 * E * I) };
+    case "udl-full": {
+      const w = F / L;
+      return { M: (w * L * L) / 8, delta: (5 * w * Math.pow(L, 4)) / (384 * E * I) };
+    }
+    case "udl-half-left":
+    case "udl-half-right": {
+      const w = F / L;
+      return {
+        M: (9 * w * L * L) / 128,
+        delta: (5 * F * L * L * L) / (768 * E * I),
+      };
+    }
+  }
+}
+
+/** Full report for one profile under the scenario (all six cases + buckling). */
 export function evaluateBeam(
   profile: HBeamProfile,
-  criteria: SelectionCriteria,
-): BeamEvaluation {
-  const cr = resolve(criteria);
-  const L = cr.spanM; // m
-  const Lmm = L * 1000; // mm
-  const E = cr.eGpa * 1000; // GPa -> MPa (N/mm^2)
-  const Imm4 = profile.Ix * 1e4; // cm^4 -> mm^4
-  const Sxmm3 = profile.Sx * 1000; // cm^3 -> mm^3
-  const sigmaAllow = cr.allowableStressFactor * cr.fyMpa; // MPa
+  scenario: Scenario,
+): BeamReport {
+  const s = resolve(scenario);
+  const L = s.spanMm;
+  const E = s.material.eMpa;
+  const I = profile.Ix * 1e4; // cm^4 -> mm^4
+  const Sx = profile.Sx * 1e3; // cm^3 -> mm^3
+  const A = profile.area * 1e2; // cm^2 -> mm^2
+  const allowableStressMpa = s.material.fyMpa / s.fos;
+  const allowableDeflectionMm = L / s.deflectionLimit;
 
-  // self weight as a UDL (kg/m -> kN/m); note 1 kN/m === 1 N/mm
-  const selfW = cr.includeSelfWeight ? (profile.weight * G) / 1000 : 0;
+  const cases: LoadCaseResult[] = LOAD_CASE_ORDER.map((id) => {
+    const { M, delta } = caseMD(id, s.totalForceN, L, E, I, s.pointNearAMm);
+    const bendingStressMpa = M / Sx;
+    const stressRatio = bendingStressMpa / allowableStressMpa;
+    const deflectionRatio = delta / allowableDeflectionMm;
+    return {
+      id,
+      label: LOAD_CASE_LABELS[id],
+      momentNmm: M,
+      bendingStressMpa,
+      deflectionMm: delta,
+      stressRatio,
+      deflectionRatio,
+      passes: stressRatio <= 1 && deflectionRatio <= 1,
+    };
+  });
 
-  let momentKnm: number;
-  let deflectionMm: number;
-
-  if (cr.loadType === "udl") {
-    const w = cr.udlKnPerM + selfW; // kN/m (= N/mm)
-    momentKnm = (w * L * L) / 8;
-    deflectionMm = (5 * w * Math.pow(Lmm, 4)) / (384 * E * Imm4);
-  } else {
-    const P = cr.pointKn; // kN
-    const w = selfW; // kN/m self weight still acts as UDL
-    momentKnm = (P * L) / 4 + (w * L * L) / 8;
-    const Pn = P * 1000; // kN -> N
-    const dPoint = (Pn * Math.pow(Lmm, 3)) / (48 * E * Imm4);
-    const dUdl = (5 * w * Math.pow(Lmm, 4)) / (384 * E * Imm4);
-    deflectionMm = dPoint + dUdl;
-  }
-
-  const bendingStressMpa = (momentKnm * 1e6) / Sxmm3; // kN*m = 1e6 N*mm
-  const allowableDeflectionMm = Lmm / cr.deflectionLimit;
-
-  const stressRatio = bendingStressMpa / sigmaAllow;
-  const deflectionRatio = deflectionMm / allowableDeflectionMm;
-  const safetyFactor = Math.min(
-    sigmaAllow / bendingStressMpa,
-    allowableDeflectionMm / deflectionMm,
+  const worstStress = cases.reduce((a, b) =>
+    b.stressRatio > a.stressRatio ? b : a,
   );
-  const governs = stressRatio >= deflectionRatio ? "bending" : "deflection";
-  const passes = stressRatio <= 1 && deflectionRatio <= 1;
+  const worstDeflection = cases.reduce((a, b) =>
+    b.deflectionRatio > a.deflectionRatio ? b : a,
+  );
+
+  const bucklingPcrN =
+    (Math.PI * Math.PI * E * I) / Math.pow(s.bucklingK * L, 2);
+  const bucklingStressMpa = bucklingPcrN / A;
+  const bucklingOk = bucklingPcrN > s.totalForceN;
+
+  const stressOk = worstStress.stressRatio <= 1;
+  const deflectionOk = worstDeflection.deflectionRatio <= 1;
+  const passes = stressOk && deflectionOk && bucklingOk;
+  const minSafetyFactor = Math.min(
+    1 / worstStress.stressRatio,
+    1 / worstDeflection.deflectionRatio,
+  );
 
   return {
     profile,
-    momentKnm,
-    bendingStressMpa,
-    allowableStressMpa: sigmaAllow,
-    deflectionMm,
+    cases,
+    worstStress,
+    worstDeflection,
+    allowableStressMpa,
     allowableDeflectionMm,
-    stressRatio,
-    deflectionRatio,
-    safetyFactor,
-    governs,
+    bucklingPcrN,
+    bucklingStressMpa,
+    bucklingOk,
+    stressOk,
+    deflectionOk,
     passes,
+    minSafetyFactor,
   };
 }
 
 /**
- * Evaluate the whole catalog and rank it. Passing profiles come first,
- * ordered by lightest weight (most economical); failing profiles follow,
- * ordered by how close they came (lowest worst-case utilisation first).
+ * Evaluate and rank the catalog. Passing profiles first (lightest weight =
+ * most economical), then failing profiles by lowest worst-case utilisation.
  */
 export function selectBeam(
-  criteria: SelectionCriteria,
+  scenario: Scenario,
   catalog: HBeamProfile[] = HBEAM_CATALOG,
-): SelectionResult {
-  const cr = resolve(criteria);
-  const evaluations = catalog.map((p) => evaluateBeam(p, criteria));
-  evaluations.sort((a, b) => {
+): SelectionReport {
+  const s = resolve(scenario);
+  const reports = catalog.map((p) => evaluateBeam(p, scenario));
+  reports.sort((a, b) => {
     if (a.passes !== b.passes) return a.passes ? -1 : 1;
     if (a.passes) return a.profile.weight - b.profile.weight;
     return (
-      Math.max(a.stressRatio, a.deflectionRatio) -
-      Math.max(b.stressRatio, b.deflectionRatio)
+      Math.max(a.worstStress.stressRatio, a.worstDeflection.deflectionRatio) -
+      Math.max(b.worstStress.stressRatio, b.worstDeflection.deflectionRatio)
     );
   });
-  const recommended = evaluations.find((e) => e.passes) ?? null;
-  return { criteria: cr, evaluations, recommended };
+  return { scenario: s, reports, recommended: reports.find((r) => r.passes) ?? null };
 }
 
-/** A short, human-readable explanation of the recommendation. */
-export function explain(result: SelectionResult): string {
-  const c = result.criteria;
-  const load =
-    c.loadType === "udl"
-      ? `${c.udlKnPerM} kN/m UDL`
-      : `${c.pointKn} kN point load at midspan`;
-  const head = `Span ${c.spanM} m, ${load}, fy ${c.fyMpa} MPa, deflection limit L/${c.deflectionLimit}.`;
-  if (!result.recommended) {
-    return `${head}\nNo catalog section passes. The closest is ${result.evaluations[0]?.profile.name} (utilisation ${(Math.max(result.evaluations[0]?.stressRatio ?? 0, result.evaluations[0]?.deflectionRatio ?? 0) * 100).toFixed(0)}%). Consider a deeper section, higher grade, or shorter span.`;
+/** Build a scenario from a mass + multiplier instead of a raw force. */
+export function forceFromMass(massKg: number, multiplier = 1): number {
+  return massKg * 9.81 * multiplier;
+}
+
+/** Short, human-readable summary of the recommendation. */
+export function explain(report: SelectionReport): string {
+  const s = report.scenario;
+  const head = `Span ${(s.spanMm / 1000).toFixed(1)} m, design force ${(s.totalForceN / 1000).toFixed(1)} kN, ${s.material.name}, allowable ${(s.material.fyMpa / s.fos).toFixed(1)} MPa (fy/${s.fos}), deflection L/${s.deflectionLimit}.`;
+  if (!report.recommended) {
+    const c = report.reports[0];
+    return `${head}\nNo catalog section passes all six cases. Closest: ${c?.profile.name} (worst utilisation ${(Math.max(c?.worstStress.stressRatio ?? 0, c?.worstDeflection.deflectionRatio ?? 0) * 100).toFixed(0)}%).`;
   }
-  const r = result.recommended;
-  return `${head}\nLightest passing section: ${r.profile.name} (${r.profile.weight} kg/m). Bending ${r.bendingStressMpa.toFixed(0)}/${r.allowableStressMpa.toFixed(0)} MPa (${(r.stressRatio * 100).toFixed(0)}%), deflection ${r.deflectionMm.toFixed(1)}/${r.allowableDeflectionMm.toFixed(1)} mm (${(r.deflectionRatio * 100).toFixed(0)}%), governed by ${r.governs}, safety factor ${r.safetyFactor.toFixed(2)}.`;
+  const r = report.recommended;
+  return `${head}\nLightest passing section: ${r.profile.name} (${r.profile.weight} kg/m). Governing stress ${r.worstStress.bendingStressMpa.toFixed(1)} MPa in "${r.worstStress.label}" (${(r.worstStress.stressRatio * 100).toFixed(0)}%); governing deflection ${r.worstDeflection.deflectionMm.toFixed(1)} mm in "${r.worstDeflection.label}" (${(r.worstDeflection.deflectionRatio * 100).toFixed(0)}%); buckling Pcr ${(r.bucklingPcrN / 1000).toFixed(0)} kN; safety factor ${r.minSafetyFactor.toFixed(2)}.`;
 }
