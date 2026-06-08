@@ -1,70 +1,56 @@
-# H-Beam Selector
+# Structron — H-Beam Selector
 
-A computational tool that ranks standard hot-rolled **H-sections (WF / IWF)**
-against a set of structural criteria and returns the lightest section that
-passes, using classical beam theory. Built for a Computational Physics
-assignment and embedded as a public tool in the Etzal Group site
+An agentic structural-optimization tool that ranks 80+ standard H-sections
+(WF / IWF / JIS HW-HM-HN, plus IPE/HEB) against a load scenario and returns
+the lightest section that passes every check, using Euler-Bernoulli beam
+theory. Built for the SCIE6063001 Computational Physics project (**Structron**)
+and embedded as a public tool in the Etzal Group site
 (`/tools/h-beam-selector`).
 
 ## What it computes
 
-Model: a **simply supported beam** bent about its strong axis, under either a
-uniformly distributed load (UDL) or a central point load, optionally
-including the beam's own self-weight.
+Model: a **simply supported beam** under a total design force `F`, evaluated
+across **six loading cases**, plus an Euler buckling check.
 
-| Quantity | UDL | Central point load |
+| Load case | Max moment | Max deflection |
 |---|---|---|
-| Max moment `M` | `w·L² / 8` | `P·L / 4` |
-| Max deflection `δ` | `5·w·L⁴ / (384·E·I)` | `P·L³ / (48·E·I)` |
+| Point near support / 25% (at `a`, `b=L-a`) | `F·a·b/L` | `F·a²·b²/(3EIL)` |
+| Point at midspan | `F·L/4` | `F·L³/(48EI)` |
+| Full UDL (`w=F/L`) | `w·L²/8` | `5wL⁴/(384EI)` |
+| Half UDL (left/right) | `9wL²/128` | `5FL³/(768EI)` |
+| Euler buckling | — | `Pcr = π²EI/(KL)²` |
 
-Checks (Allowable Stress Design):
+Checks (Allowable Stress Design): bending `σ = M/Wx ≤ fy/FoS` and deflection
+`δ ≤ L/limit` (e.g. L/360), across all six cases. The **recommended** section
+is the lightest catalog profile that passes the worst of all cases.
 
-- **Bending:** `σ = M / Sₓ ≤ σ_allow = factor · f_y` (default factor 0.66)
-- **Deflection:** `δ ≤ L / limit` (default `L/360`)
+Materials: Q235B, SS400, Q355B, A36 steel and 6061-T6 aluminum.
 
-The **recommended** section is the lightest catalog profile that passes both
-checks. Safety factor = `min(σ_allow/σ, δ_allow/δ)`.
+## Two surfaces, one engine
 
-### Units
+- **TypeScript** (`src/`): used by the Etzal web tool + API. Run standalone:
+  ```bash
+  npx tsx src/cli.ts 12 4320 3 3   # span 12m, 4320kg, x3, FoS 3
+  npx tsx src/engine.test.ts        # validates against the report
+  ```
+- **Python** (`python/`): the graded deliverable — `structron.py` engine +
+  `Structron.ipynb` analysis notebook (benchmark validation, error analysis,
+  visualization, agentic selection). Shares the same `catalog.json`.
 
-Catalog properties use engineering units (mm, cm², cm³, cm⁴, kg/m); the
-engine converts to SI internally (N, mm, MPa). Self-weight uses `g = 9.81`.
+## Validation
 
-## Usage
-
-```ts
-import { selectBeam, explain } from "@etzal/hbeam-selector";
-
-const result = selectBeam({
-  spanM: 6,
-  loadType: "udl",
-  udlKnPerM: 20,
-  fyMpa: 240,
-  deflectionLimit: 360,
-});
-
-console.log(explain(result));
-console.log(result.recommended?.profile.name); // lightest passing section
-```
-
-### Run standalone
-
-```bash
-npx tsx src/cli.ts 6 20 240 360   # span 6m, 20 kN/m UDL, fy 240, L/360
-npx tsx src/engine.test.ts        # sanity tests
-```
+Reproduces the manual reference report (HW 428x407x20x35, 12 m, F = 127,138 N,
+FoS 3.0): midspan point load **68.35 MPa / 19.23 mm**, full UDL **34.18 MPa /
+12.02 mm**, Euler **Pcr 16,312 kN**. The agentic search then finds a section
+~35% lighter that still passes every case.
 
 ## Files
 
-- `src/types.ts` — domain types (profile, criteria, evaluation)
-- `src/catalog.ts` — JIS/SNI H-section table (subset)
-- `src/engine.ts` — beam-theory engine (moment, stress, deflection, ranking)
-- `src/cli.ts` — command-line demo
-- `src/engine.test.ts` — sanity tests
+- `src/` — TS engine (`types`, `materials`, `catalog`, `engine`, `cli`, tests)
+- `python/` — Python engine, notebook, catalog.json, requirements, README
 
-## Notes & limitations
+## Scope & limitations
 
-- Strong-axis bending only; no lateral-torsional buckling, shear, web
-  crippling, or combined axial checks (kept to the scope of the assignment).
-- Catalog is a representative subset; extend `HBEAM_CATALOG` as needed.
-- Section-table values are nominal published figures.
+Strong-axis bending only; excludes lateral-torsional buckling, shear, web
+crippling and combined-axial checks. Verify against your design code before
+construction.
