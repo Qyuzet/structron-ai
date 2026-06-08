@@ -249,6 +249,107 @@ export function forceFromMass(massKg: number, multiplier = 1): number {
   return massKg * 9.81 * multiplier;
 }
 
+// ---------------------------------------------------------------------------
+// Audit trail: traceable, PhotoMath-style calculation steps
+// ---------------------------------------------------------------------------
+
+export interface AuditStep {
+  key: string;
+  label: string;
+  /** Symbolic formula, e.g. "σ = M / Wx". */
+  expr: string;
+  /** Same formula with numbers substituted. */
+  subst: string;
+  /** Computed value + unit. */
+  result: string;
+  /** Keys of the steps this one depends on (for click-to-trace). */
+  refs: string[];
+}
+
+const _num = (x: number) =>
+  x.toLocaleString("en-US", { maximumFractionDigits: 2 });
+const _sci = (x: number) => x.toExponential(2);
+
+/** Build the ordered calculation steps for one section under one load case. */
+export function buildAudit(
+  profile: HBeamProfile,
+  scenario: Scenario,
+  caseId: LoadCaseId,
+): AuditStep[] {
+  const s = resolve(scenario);
+  const L = s.spanMm;
+  const E = s.material.eMpa;
+  const F = s.totalForceN;
+  const I = profile.Ix * 1e4;
+  const Sx = profile.Sx * 1e3;
+  const { M, delta } = caseMD(caseId, F, L, E, I, s.pointNearAMm);
+  const sigma = M / Sx;
+  const sAllow = s.material.fyMpa / s.fos;
+  const dAllow = L / s.deflectionLimit;
+  const Pcr = (Math.PI * Math.PI * E * I) / Math.pow(s.bucklingK * L, 2);
+  const steps: AuditStep[] = [];
+
+  // --- moment ---
+  if (caseId === "point-mid") {
+    steps.push({ key: "M", label: "Max moment (point at midspan)", expr: "M = F·L / 4",
+      subst: `= ${_num(F)} × ${_num(L)} / 4`, result: `${_sci(M)} N·mm`, refs: [] });
+  } else if (caseId.startsWith("point")) {
+    const a = caseId === "point-quarter" ? 0.25 * L : s.pointNearAMm;
+    const b = L - a;
+    steps.push({ key: "M", label: "Max moment (point load)", expr: "M = F·a·b / L",
+      subst: `= ${_num(F)} × ${_num(a)} × ${_num(b)} / ${_num(L)}`, result: `${_sci(M)} N·mm`, refs: [] });
+  } else {
+    const w = F / L;
+    steps.push({ key: "w", label: "Distributed load", expr: "w = F / L",
+      subst: `= ${_num(F)} / ${_num(L)}`, result: `${w.toFixed(2)} N/mm`, refs: [] });
+    if (caseId.startsWith("udl-half"))
+      steps.push({ key: "M", label: "Max moment (half UDL)", expr: "M = 9·w·L² / 128",
+        subst: `= 9 × ${w.toFixed(2)} × ${_num(L)}² / 128`, result: `${_sci(M)} N·mm`, refs: ["w"] });
+    else
+      steps.push({ key: "M", label: "Max moment (UDL)", expr: "M = w·L² / 8",
+        subst: `= ${w.toFixed(2)} × ${_num(L)}² / 8`, result: `${_sci(M)} N·mm`, refs: ["w"] });
+  }
+
+  // --- stress ---
+  steps.push({ key: "sigma", label: "Bending stress", expr: "σ = M / Wx",
+    subst: `= ${_sci(M)} / ${_sci(Sx)}`, result: `${sigma.toFixed(2)} MPa`, refs: ["M"] });
+  steps.push({ key: "sAllow", label: "Allowable stress", expr: "σ_allow = fy / FoS",
+    subst: `= ${s.material.fyMpa} / ${s.fos}`, result: `${sAllow.toFixed(2)} MPa`, refs: [] });
+  steps.push({ key: "stressChk", label: "Stress utilisation", expr: "σ / σ_allow",
+    subst: `= ${sigma.toFixed(1)} / ${sAllow.toFixed(1)}`,
+    result: `${((sigma / sAllow) * 100).toFixed(0)}% ${sigma <= sAllow ? "PASS" : "FAIL"}`,
+    refs: ["sigma", "sAllow"] });
+
+  // --- deflection ---
+  if (caseId === "point-mid")
+    steps.push({ key: "delta", label: "Max deflection", expr: "δ = F·L³ / (48·E·I)",
+      subst: `= ${_num(F)} × ${_num(L)}³ / (48 × ${_num(E)} × ${_sci(I)})`, result: `${delta.toFixed(2)} mm`, refs: [] });
+  else if (caseId.startsWith("point")) {
+    const a = caseId === "point-quarter" ? 0.25 * L : s.pointNearAMm;
+    const b = L - a;
+    steps.push({ key: "delta", label: "Max deflection", expr: "δ = F·a²·b² / (3·E·I·L)",
+      subst: `= ${_num(F)} × ${_num(a)}² × ${_num(b)}² / (3 × ${_num(E)} × ${_sci(I)} × ${_num(L)})`,
+      result: `${delta.toFixed(2)} mm`, refs: [] });
+  } else if (caseId.startsWith("udl-half"))
+    steps.push({ key: "delta", label: "Deflection at midspan", expr: "δ = 5·F·L³ / (768·E·I)",
+      subst: `= 5 × ${_num(F)} × ${_num(L)}³ / (768 × ${_num(E)} × ${_sci(I)})`, result: `${delta.toFixed(2)} mm`, refs: [] });
+  else
+    steps.push({ key: "delta", label: "Max deflection", expr: "δ = 5·w·L⁴ / (384·E·I)",
+      subst: `= 5 × ${(F / L).toFixed(2)} × ${_num(L)}⁴ / (384 × ${_num(E)} × ${_sci(I)})`, result: `${delta.toFixed(2)} mm`, refs: ["w"] });
+  steps.push({ key: "dAllow", label: "Allowable deflection", expr: `δ_allow = L / ${s.deflectionLimit}`,
+    subst: `= ${_num(L)} / ${s.deflectionLimit}`, result: `${dAllow.toFixed(2)} mm`, refs: [] });
+  steps.push({ key: "deflChk", label: "Deflection utilisation", expr: "δ / δ_allow",
+    subst: `= ${delta.toFixed(1)} / ${dAllow.toFixed(1)}`,
+    result: `${((delta / dAllow) * 100).toFixed(0)}% ${delta <= dAllow ? "PASS" : "FAIL"}`,
+    refs: ["delta", "dAllow"] });
+
+  // --- buckling ---
+  steps.push({ key: "Pcr", label: "Euler buckling load", expr: "Pcr = π²·E·I / (K·L)²",
+    subst: `= π² × ${_num(E)} × ${_sci(I)} / (${s.bucklingK} × ${_num(L)})²`, result: `${_sci(Pcr)} N`, refs: [] });
+
+  return steps;
+}
+
 /** Short, human-readable summary of the recommendation. */
 export function explain(report: SelectionReport): string {
   const s = report.scenario;
