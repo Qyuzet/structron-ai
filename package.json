@@ -1,0 +1,20 @@
+{
+  "name": "@etzal/hbeam-selector",
+  "version": "0.1.0",
+  "description": "H-beam (WF/IWF) steel selector: ranks standard sections against span, load, material and deflection criteria using beam theory. Computational Physics tool.",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./catalog": "./src/catalog.ts",
+    "./engine": "./src/engine.ts"
+  },
+  "scripts": {
+    "demo": "tsx src/cli.ts",
+    "test": "tsx src/engine.test.ts"
+  },
+  "keywords": ["h-beam", "steel", "structural", "beam-theory", "physics"],
+  "license": "MIT"
+}
