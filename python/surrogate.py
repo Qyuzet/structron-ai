@@ -104,6 +104,49 @@ def predict(model, xs, ys, span_mm, force_n, E, Ix_mm4, Sx_mm3, is_point):
     return {"deflection_mm": float(10 ** out[0]), "stress_mpa": float(out[1])}
 
 
+def recover_exponents(n: int = 500, seed: int = 1):
+    """
+    Log-linear (OLS) regression on FE-generated UDL deflections. In log space,
+        ln(delta) = b0 + bF*ln F + bL*ln L + bE*ln E + bI*ln I,
+    so the learned coefficients should recover the physical scaling exponents of
+    delta = 5 F L^3 / (384 E I), namely [F:+1, L:+3, E:-1, I:-1]. Recovering them
+    from data alone is direct evidence that the model learned the physics rather
+    than merely fitting points.
+    """
+    rng = random.Random(seed)
+    catalog = load_catalog()
+    mats = list(MATERIALS.values())
+    rows, ln_d = [], []
+    for _ in range(n):
+        span = rng.uniform(3000, 15000)
+        force = rng.uniform(10_000, 350_000)
+        mat = rng.choice(mats)
+        sec = rng.choice(catalog)
+        I = sec["Ix"] * 1e4
+        model = fea.simply_supported_beam(
+            span, force, mat["E"], I, sec["area"] * 1e2, sec["Sx"] * 1e3,
+            n_elems=10, load="udl",
+        )
+        defl = fea.analyze(model)["max_deflection_mm"]
+        if defl <= 0:
+            continue
+        rows.append([1.0, np.log(force), np.log(span), np.log(mat["E"]), np.log(I)])
+        ln_d.append(np.log(defl))
+    A, b = np.array(rows), np.array(ln_d)
+    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+    pred = A @ coef
+    ss_res = float(np.sum((b - pred) ** 2))
+    ss_tot = float(np.sum((b - b.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    return {
+        "coef": coef.tolist(),            # [b0, bF, bL, bE, bI]
+        "theoretical": [None, 1.0, 3.0, -1.0, -1.0],
+        "labels": ["intercept", "ln F", "ln L", "ln E", "ln I"],
+        "r2": r2,
+        "n": len(b),
+    }
+
+
 if __name__ == "__main__":
     print("Generating FE dataset...")
     X, y = generate_dataset(3000)
