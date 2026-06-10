@@ -55,30 +55,39 @@ export function fitDeflectionSurrogate(
     return s / 0x7fffffff;
   };
 
-  const X: number[][] = [];
-  const y: number[] = [];
+  // STEP 1 - build the dataset by RUNNING THE FE SOLVER on random designs.
+  // X holds one row per sample: [1, lnF, lnL, lnE, lnI] (the "1" is the
+  // intercept term). y holds the matching ln(deflection). Working in natural
+  // logs turns the power-law delta = 5*F*L^3/(384*E*I) into a straight line.
+  const X: number[][] = []; // feature rows in log space
+  const y: number[] = []; // target ln(deflection)
   for (let i = 0; i < n; i++) {
-    const L = 3000 + rnd() * 12000;
-    const F = 10000 + rnd() * 300000;
-    const E = rnd() < 0.5 ? 200000 : 69000;
-    const p = catalog[Math.floor(rnd() * catalog.length)];
-    const sec = { E, A: p.area * 1e2, I: p.Ix * 1e4, Sx: p.Sx * 1e3 };
-    const d = simpleBeamFE(L, F, sec, 10, "udl").maxDeflectionMm;
-    if (!(d > 0) || !isFinite(d)) continue;
+    const L = 3000 + rnd() * 12000; // random span 3 m .. 15 m (mm)
+    const F = 10000 + rnd() * 300000; // random force 10 kN .. 310 kN (N)
+    const E = rnd() < 0.5 ? 200000 : 69000; // steel (200000) or aluminium (69000) MPa
+    const p = catalog[Math.floor(rnd() * catalog.length)]; // random catalog section
+    const sec = { E, A: p.area * 1e2, I: p.Ix * 1e4, Sx: p.Sx * 1e3 }; // to mm units
+    const d = simpleBeamFE(L, F, sec, 10, "udl").maxDeflectionMm; // GROUND TRUTH from FE
+    if (!(d > 0) || !isFinite(d)) continue; // skip degenerate samples
     X.push([1, Math.log(F), Math.log(L), Math.log(E), Math.log(sec.I)]);
     y.push(Math.log(d));
   }
 
-  const k = 5;
-  const XtX = Array.from({ length: k }, () => new Array(k).fill(0));
-  const Xty = new Array(k).fill(0);
+  // STEP 2 - fit the regression by ordinary least squares (OLS).
+  // Solve the normal equations (X^T X) coef = (X^T y). coef ends up as
+  // [intercept, exponent of F, exponent of L, exponent of E, exponent of I].
+  const k = 5; // 1 intercept + 4 features
+  const XtX = Array.from({ length: k }, () => new Array(k).fill(0)); // X^T X (k x k)
+  const Xty = new Array(k).fill(0); // X^T y (length k)
   for (let i = 0; i < X.length; i++)
     for (let a = 0; a < k; a++) {
       Xty[a] += X[i][a] * y[i];
       for (let b = 0; b < k; b++) XtX[a][b] += X[i][a] * X[i][b];
     }
-  const coef = solve(XtX, Xty);
+  const coef = solve(XtX, Xty); // the learned coefficients (should be ~[ln(5/384), 1, 3, -1, -1])
 
+  // STEP 3 - measure the fit with R^2 = 1 - SSR/SST (1.0 = perfect).
+  // SSR = sum of squared residuals, SST = total variance of y.
   const ymean = y.reduce((a, b) => a + b, 0) / y.length;
   let ssr = 0;
   let sst = 0;

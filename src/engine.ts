@@ -47,21 +47,40 @@ export const LOAD_CASE_ORDER: LoadCaseId[] = [
   "udl-half-right",
 ];
 
+/**
+ * Fill in default input numbers for any field the caller left out. These
+ * defaults are the assumptions of the study, so this is the place to read the
+ * exact input values from.
+ */
 function resolve(s: Scenario): Required<Scenario> {
   return {
-    spanMm: s.spanMm,
-    totalForceN: s.totalForceN,
-    material: s.material ?? DEFAULT_MATERIAL,
-    fos: s.fos ?? 3.0,
-    deflectionLimit: s.deflectionLimit ?? 360,
-    bucklingK: s.bucklingK ?? 1.0,
-    pointNearAMm: s.pointNearAMm ?? 1000,
-    objective: s.objective ?? "weight",
-    requireInStock: s.requireInStock ?? false,
+    spanMm: s.spanMm, // L: clear span between supports, in millimetres
+    totalForceN: s.totalForceN, // F: total design force on the span, in newtons
+    material: s.material ?? DEFAULT_MATERIAL, // steel grade (carries fy and E); default Q235B
+    fos: s.fos ?? 3.0, // Factor of Safety; allowable stress = fy / FoS. Default 3.0
+    deflectionLimit: s.deflectionLimit ?? 360, // serviceability limit L/n; default L/360
+    bucklingK: s.bucklingK ?? 1.0, // Euler effective-length factor K; 1.0 = pinned-pinned
+    pointNearAMm: s.pointNearAMm ?? 1000, // distance a of the "near support" point load (mm)
+    objective: s.objective ?? "weight", // ranking goal: "weight" (lightest) or "cost" (cheapest)
+    requireInStock: s.requireInStock ?? false, // if true, only recommend sections in stock
   };
 }
 
-/** Moment (N*mm) and deflection (mm) for a load case. */
+/**
+ * Core physics: maximum bending moment M and maximum deflection delta for one
+ * load case on a simply supported beam (Euler-Bernoulli theory).
+ *
+ * Inputs:
+ *   id    - which of the six load cases
+ *   F     - total design force (N)
+ *   L     - span (mm)
+ *   E     - Young's modulus / stiffness of the material (MPa = N/mm^2)
+ *   I     - second moment of area of the section (mm^4); bigger I = stiffer
+ *   aNear - distance of the near-support point load from the left support (mm)
+ * Returns:
+ *   M     - maximum bending moment (N*mm); drives stress later via sigma = M/Wx
+ *   delta - maximum deflection (mm); compared against the allowable L/limit
+ */
 function caseMD(
   id: LoadCaseId,
   F: number,
@@ -71,25 +90,33 @@ function caseMD(
   aNear: number,
 ): { M: number; delta: number } {
   switch (id) {
+    // Point load F at distance a from the left support; b is the rest (b = L - a).
     case "point-near": {
-      const a = aNear;
-      const b = L - a;
+      const a = aNear; // load position from the left support (mm)
+      const b = L - a; // remaining distance to the right support (mm)
+      // M = F*a*b/L ; deflection under the load delta = F*a^2*b^2 / (3*E*I*L)
       return { M: (F * a * b) / L, delta: (F * a * a * b * b) / (3 * E * I * L) };
     }
     case "point-quarter": {
-      const a = 0.25 * L;
+      const a = 0.25 * L; // load at 25% of the span
       const b = L - a;
       return { M: (F * a * b) / L, delta: (F * a * a * b * b) / (3 * E * I * L) };
     }
+    // Point load at midspan: the symmetric textbook case.
+    // M = F*L/4 ; delta = F*L^3 / (48*E*I)
     case "point-mid":
       return { M: (F * L) / 4, delta: (F * L * L * L) / (48 * E * I) };
+    // Uniformly distributed load: spread the total force over the span, w = F/L (N/mm).
+    // M = w*L^2/8 ; delta = 5*w*L^4 / (384*E*I)
     case "udl-full": {
-      const w = F / L;
+      const w = F / L; // distributed intensity (N/mm)
       return { M: (w * L * L) / 8, delta: (5 * w * Math.pow(L, 4)) / (384 * E * I) };
     }
+    // UDL over one half of the span (left or right give the same peak values).
+    // M = 9*w*L^2/128 ; delta = 5*F*L^3 / (768*E*I)
     case "udl-half-left":
     case "udl-half-right": {
-      const w = F / L;
+      const w = F / L; // distributed intensity over the loaded half (N/mm)
       return {
         M: (9 * w * L * L) / 128,
         delta: (5 * F * L * L * L) / (768 * E * I),
@@ -104,19 +131,25 @@ export function evaluateBeam(
   scenario: Scenario,
 ): BeamReport {
   const s = resolve(scenario);
-  const L = s.spanMm;
-  const E = s.material.eMpa;
-  const I = profile.Ix * 1e4; // cm^4 -> mm^4
-  const Sx = profile.Sx * 1e3; // cm^3 -> mm^3
-  const A = profile.area * 1e2; // cm^2 -> mm^2
-  const allowableStressMpa = s.material.fyMpa / s.fos;
-  const allowableDeflectionMm = L / s.deflectionLimit;
+  const L = s.spanMm; // span (mm)
+  const E = s.material.eMpa; // Young's modulus (MPa)
+  // Section properties come from the catalog in cm units; convert to mm here so
+  // every formula below stays in a consistent N-mm-MPa unit system.
+  const I = profile.Ix * 1e4; // second moment of area: cm^4 -> mm^4
+  const Sx = profile.Sx * 1e3; // section modulus: cm^3 -> mm^3 (used for stress sigma = M/Sx)
+  const A = profile.area * 1e2; // cross-section area: cm^2 -> mm^2 (used for buckling stress)
+  // Allowable (limit) values the section must stay under to PASS:
+  const allowableStressMpa = s.material.fyMpa / s.fos; // sigma_allow = fy / FoS
+  const allowableDeflectionMm = L / s.deflectionLimit; // delta_allow = L / limit (e.g. L/360)
 
+  // Evaluate all six load cases. Each produces a stress and a deflection plus
+  // their utilisation ratios (value / allowable). A case PASSES when both
+  // ratios are at or below 1 (i.e. within the limits).
   const cases: LoadCaseResult[] = LOAD_CASE_ORDER.map((id) => {
-    const { M, delta } = caseMD(id, s.totalForceN, L, E, I, s.pointNearAMm);
-    const bendingStressMpa = M / Sx;
-    const stressRatio = bendingStressMpa / allowableStressMpa;
-    const deflectionRatio = delta / allowableDeflectionMm;
+    const { M, delta } = caseMD(id, s.totalForceN, L, E, I, s.pointNearAMm); // moment + deflection
+    const bendingStressMpa = M / Sx; // flexure formula: stress = moment / section modulus
+    const stressRatio = bendingStressMpa / allowableStressMpa; // 0..1+ ; >1 means over-stressed
+    const deflectionRatio = delta / allowableDeflectionMm; // 0..1+ ; >1 means sags too much
     return {
       id,
       label: LOAD_CASE_LABELS[id],
@@ -129,6 +162,8 @@ export function evaluateBeam(
     };
   });
 
+  // The governing cases: the single worst stress case and the single worst
+  // deflection case decide whether the section is adequate.
   const worstStress = cases.reduce((a, b) =>
     b.stressRatio > a.stressRatio ? b : a,
   );
@@ -136,14 +171,19 @@ export function evaluateBeam(
     b.deflectionRatio > a.deflectionRatio ? b : a,
   );
 
+  // Euler buckling capacity (a stability check, not a strength check).
+  // Pcr = pi^2 * E * I / (K*L)^2 ; the section is OK if Pcr exceeds the load F.
   const bucklingPcrN =
     (Math.PI * Math.PI * E * I) / Math.pow(s.bucklingK * L, 2);
-  const bucklingStressMpa = bucklingPcrN / A;
-  const bucklingOk = bucklingPcrN > s.totalForceN;
+  const bucklingStressMpa = bucklingPcrN / A; // critical stress = Pcr / area
+  const bucklingOk = bucklingPcrN > s.totalForceN; // capacity must beat the applied force
 
+  // Overall pass requires stress, deflection AND buckling to all be satisfied.
   const stressOk = worstStress.stressRatio <= 1;
   const deflectionOk = worstDeflection.deflectionRatio <= 1;
   const passes = stressOk && deflectionOk && bucklingOk;
+  // Safety factor = how much spare capacity is left (1 / worst utilisation).
+  // A value of 1.18 means the section is used to ~85% of its limit.
   const minSafetyFactor = Math.min(
     1 / worstStress.stressRatio,
     1 / worstDeflection.deflectionRatio,
@@ -222,22 +262,31 @@ export function selectBeam(
   overrides?: QuoteOverride[],
 ): SelectionReport {
   const s = resolve(scenario);
+  // 1) Evaluate EVERY section in the catalog (this is the "agentic" screening).
   const reports = catalog.map((p) => evaluateBeam(p, scenario));
+  // 2) If a supplier quotation was read, overwrite the model prices with the
+  //    quoted ones so the cost ranking uses real numbers.
   if (overrides?.length) applyOverrides(reports, overrides, s.spanMm);
+  // 3) Rank the sections:
   reports.sort((a, b) => {
+    // passing sections always rank above failing ones
     if (a.passes !== b.passes) return a.passes ? -1 : 1;
     if (a.passes) {
+      // among passing sections, in-stock first (only when stock is required)...
       if (s.requireInStock && a.supplier.inStock !== b.supplier.inStock)
         return a.supplier.inStock ? -1 : 1;
+      // ...then by the chosen objective: cheapest, or lightest (default)
       return s.objective === "cost"
         ? a.totalCostIdr - b.totalCostIdr
         : a.profile.weight - b.profile.weight;
     }
+    // among failing sections, order by least-bad (lowest worst utilisation)
     return (
       Math.max(a.worstStress.stressRatio, a.worstDeflection.deflectionRatio) -
       Math.max(b.worstStress.stressRatio, b.worstDeflection.deflectionRatio)
     );
   });
+  // 4) The recommendation is the first passing (and, if required, in-stock) one.
   const recommended =
     reports.find((r) => r.passes && (!s.requireInStock || r.supplier.inStock)) ??
     null;

@@ -47,9 +47,15 @@ function geom(m: FrameModel, e: FElement) {
   return { L, c: dx / L, s: dy / L };
 }
 
+/**
+ * 6x6 stiffness matrix of ONE beam-column element in its local axes.
+ * The 6 rows/cols are the element's degrees of freedom: [u1, v1, theta1, u2,
+ * v2, theta2] = axial, transverse and rotation at each of the two nodes.
+ * `ea` is the axial term E*A/L; `a` groups the bending terms E*I/L^3.
+ */
 function localK(E: number, A: number, I: number, L: number): number[][] {
-  const a = (E * I) / L ** 3;
-  const ea = (E * A) / L;
+  const a = (E * I) / L ** 3; // bending stiffness group
+  const ea = (E * A) / L; // axial stiffness
   return [
     [ea, 0, 0, -ea, 0, 0],
     [0, 12 * a, 6 * a * L, 0, -12 * a, 6 * a * L],
@@ -114,11 +120,19 @@ function fixedEndLocal(w: number, L: number): number[] {
   return [0, (w * L) / 2, (w * L * L) / 12, 0, (w * L) / 2, -(w * L * L) / 12];
 }
 
+/**
+ * The direct-stiffness FE solver. Steps:
+ *   1) build the global stiffness matrix K and load vector F,
+ *   2) assemble each element's stiffness into K (rotated to global axes),
+ *   3) apply the supports (remove fixed DOFs),
+ *   4) solve K*u = F for the nodal displacements u,
+ *   5) recover member forces, stresses and the deflected shape.
+ */
 export function analyzeFrame(model: FrameModel): FrameResult {
-  const nn = model.nodes.length;
-  const ndof = 3 * nn;
-  const K = Array.from({ length: ndof }, () => new Array(ndof).fill(0));
-  const F = new Array(ndof).fill(0);
+  const nn = model.nodes.length; // number of nodes
+  const ndof = 3 * nn; // total degrees of freedom (3 per node)
+  const K = Array.from({ length: ndof }, () => new Array(ndof).fill(0)); // global stiffness K
+  const F = new Array(ndof).fill(0); // global load vector F
 
   for (const [ni, l] of Object.entries(model.loads)) {
     const i = Number(ni) * 3;
@@ -137,13 +151,14 @@ export function analyzeFrame(model: FrameModel): FrameResult {
   }[] = [];
   for (const e of model.elements) {
     const { L, c, s } = geom(model, e);
-    const kl = localK(e.E, e.A, e.I, L);
-    const T = transform(c, s);
-    const kg = matmul(matmul(transpose(T), kl), T);
+    const kl = localK(e.E, e.A, e.I, L); // element stiffness in local axes
+    const T = transform(c, s); // rotation matrix (c, s = cos, sin of the element angle)
+    const kg = matmul(matmul(transpose(T), kl), T); // rotate to global axes: kg = T^T * kl * T
     const dofs = [
-      3 * e.n1, 3 * e.n1 + 1, 3 * e.n1 + 2,
-      3 * e.n2, 3 * e.n2 + 1, 3 * e.n2 + 2,
+      3 * e.n1, 3 * e.n1 + 1, 3 * e.n1 + 2, // global DOF indices of node 1
+      3 * e.n2, 3 * e.n2 + 1, 3 * e.n2 + 2, // global DOF indices of node 2
     ];
+    // scatter-add this element's 6x6 stiffness into the global matrix K
     for (let i = 0; i < 6; i++)
       for (let j = 0; j < 6; j++) K[dofs[i]][dofs[j]] += kg[i][j];
     const fef = e.w ? fixedEndLocal(e.w, L) : new Array(6).fill(0);
@@ -164,10 +179,12 @@ export function analyzeFrame(model: FrameModel): FrameResult {
   const freeIdx: number[] = [];
   for (let i = 0; i < ndof; i++) if (!fixed[i]) freeIdx.push(i);
 
-  const Kff = freeIdx.map((r) => freeIdx.map((cc) => K[r][cc]));
-  const Ff = freeIdx.map((r) => F[r]);
-  const uf = solveLinear(Kff, Ff);
-  const u = new Array(ndof).fill(0);
+  // Reduce the system to the FREE DOFs only (drop the fixed/support rows and
+  // columns), then solve Kff * uf = Ff for the unknown free displacements.
+  const Kff = freeIdx.map((r) => freeIdx.map((cc) => K[r][cc])); // reduced stiffness
+  const Ff = freeIdx.map((r) => F[r]); // reduced load vector
+  const uf = solveLinear(Kff, Ff); // <-- the actual FE solve (Gaussian elimination)
+  const u = new Array(ndof).fill(0); // full displacement vector (fixed DOFs stay 0)
   freeIdx.forEach((idx, k) => (u[idx] = uf[k]));
 
   // recovery: stress, moment, and deflected-shape sampler
